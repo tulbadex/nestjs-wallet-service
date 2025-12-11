@@ -13,7 +13,7 @@ export class Wallet {
   @Column('decimal', { precision: 15, scale: 2, default: 0 })
   balance: number;
 
-  @OneToOne(() => User, user => user.wallet)
+  @OneToOne(() => User, user => user.wallet, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: User;
 

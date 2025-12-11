@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, NotFoundException, InternalServerErrorException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, LessThan } from 'typeorm';
+import { Cron } from '@nestjs/schedule';
 import axios from 'axios';
 import { randomBytes, createHmac } from 'crypto';
 import { Wallet } from '../database/entities/wallet.entity';
@@ -97,48 +98,39 @@ export class WalletService {
       }
     }
 
+    // Only handle successful charges
     if (payload.event === 'charge.success') {
-      const { reference, amount, status } = payload.data;
-
-      const transaction = await this.transactionRepository.findOne({
-        where: { reference },
-        relations: ['user', 'user.wallet'],
-      });
-
-      if (!transaction) {
-        return { status: true }; // Ignore unknown transactions
-      }
-
-      if (transaction.status === TransactionStatus.SUCCESS) {
-        return { status: true }; // Already processed
-      }
-
-      if (status === 'success') {
-        console.log('✅ Processing successful payment:', reference);
-        await this.dataSource.transaction(async (manager) => {
-          // Update transaction status
-          await manager.update(Transaction, transaction.id, {
-            status: TransactionStatus.SUCCESS,
-          });
-
-          // Credit wallet
-          await manager.increment(
-            Wallet,
-            { id: transaction.user.wallet.id },
-            'balance',
-            amount / 100, // Convert from kobo to naira
-          );
-        });
-        console.log('✅ Wallet credited successfully');
-      } else {
-        console.log('❌ Payment failed:', reference);
-        await this.transactionRepository.update(transaction.id, {
-          status: TransactionStatus.FAILED,
-        });
-      }
+      const { reference, amount } = payload.data;
+      await this.processSuccessfulPayment(reference, amount);
     }
 
     return { status: true };
+  }
+
+  private async processSuccessfulPayment(reference: string, amount: number) {
+    const transaction = await this.transactionRepository.findOne({
+      where: { reference },
+      relations: ['user', 'user.wallet'],
+    });
+
+    if (!transaction || transaction.status === TransactionStatus.SUCCESS) {
+      return;
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(Transaction, transaction.id, {
+        status: TransactionStatus.SUCCESS,
+      });
+
+      await manager.increment(
+        Wallet,
+        { id: transaction.user.wallet.id },
+        'balance',
+        amount / 100,
+      );
+    });
+
+    console.log(`✅ Payment processed: ${reference}`);
   }
 
   async getDepositStatus(reference: string) {
@@ -272,8 +264,67 @@ export class WalletService {
     };
   }
 
+  @Cron('0 */5 * * * *') // Every 5 minutes
+  async pollPendingTransactions() {
+    console.log('🔍 Polling for pending transactions...');
+    
+    const seventyTwoHoursAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
+    // Mark transactions older than 72 hours as failed
+    await this.transactionRepository.update(
+      {
+        status: TransactionStatus.PENDING,
+        type: TransactionType.DEPOSIT,
+        createdAt: LessThan(seventyTwoHoursAgo)
+      },
+      { status: TransactionStatus.FAILED }
+    );
+    
+    // Verify transactions between 5 minutes and 72 hours old
+    const pendingTransactions = await this.transactionRepository.find({
+      where: {
+        status: TransactionStatus.PENDING,
+        type: TransactionType.DEPOSIT,
+        createdAt: LessThan(fiveMinutesAgo)
+      },
+      take: 10
+    });
+
+    for (const transaction of pendingTransactions) {
+      await this.verifyTransactionWithPaystack(transaction.reference);
+    }
+  }
+
+  private async verifyTransactionWithPaystack(reference: string) {
+    try {
+      console.log(`🔍 Verifying transaction: ${reference}`);
+      
+      const response = await axios.get(
+        `https://api.paystack.co/transaction/verify/${reference}`,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          },
+        }
+      );
+
+      const { data } = response.data;
+      
+      if (data.status === 'success') {
+        await this.processSuccessfulPayment(reference, data.amount);
+      } else {
+        await this.transactionRepository.update(
+          { reference },
+          { status: TransactionStatus.FAILED }
+        );
+      }
+    } catch (error) {
+      console.log(`⚠️ Error verifying ${reference}:`, error.message);
+    }
+  }
+
   private generateReference(): string {
-    // Use Nigeria time for reference generation
     const nigeriaTime = TimezoneUtil.getNigeriaTime();
     return `WS_${nigeriaTime.getTime()}_${randomBytes(8).toString('hex')}`;
   }

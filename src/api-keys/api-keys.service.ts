@@ -108,7 +108,11 @@ export class ApiKeysService {
       throw new NotFoundException('API key not found');
     }
 
-    await this.apiKeyRepository.update(keyId, { isActive: false });
+    // Set expiry to current time to prevent rollover
+    await this.apiKeyRepository.update(keyId, { 
+      isActive: false,
+      expiresAt: TimezoneUtil.getNigeriaTime()
+    });
     return { message: 'API key revoked successfully' };
   }
 

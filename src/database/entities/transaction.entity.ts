@@ -43,7 +43,7 @@ export class Transaction {
   @Column({ nullable: true })
   paystackReference: string;
 
-  @ManyToOne(() => User, user => user.transactions)
+  @ManyToOne(() => User, user => user.transactions, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: User;
 

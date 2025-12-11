@@ -30,7 +30,7 @@ export class ApiKey {
   @Column({ nullable: true })
   lastUsedAt: Date;
 
-  @ManyToOne(() => User, user => user.apiKeys)
+  @ManyToOne(() => User, user => user.apiKeys, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user: User;
 
